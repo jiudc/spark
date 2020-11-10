@@ -123,7 +123,7 @@ private[spark] class CompressedMapStatus(
   // For deserialization only
   protected def this() = this(null, null.asInstanceOf[Array[Byte]], -1)
 
-  def this(loc: BlockManagerId, uncompressedSizes: Array[Long], mapTaskId: Long) {
+  def this(loc: BlockManagerId, uncompressedSizes: Array[Long], mapTaskId: Long) = {
     this(loc, uncompressedSizes.map(MapStatus.compressSize), mapTaskId)
   }
 
@@ -205,7 +205,7 @@ private[spark] class HighlyCompressedMapStatus private (
 
   override def writeExternal(out: ObjectOutput): Unit = Utils.tryOrIOException {
     loc.writeExternal(out)
-    emptyBlocks.writeExternal(out)
+    emptyBlocks.serialize(out)
     out.writeLong(avgSize)
     out.writeInt(hugeBlockSizes.size)
     hugeBlockSizes.foreach { kv =>
@@ -217,8 +217,9 @@ private[spark] class HighlyCompressedMapStatus private (
 
   override def readExternal(in: ObjectInput): Unit = Utils.tryOrIOException {
     loc = BlockManagerId(in)
+    numNonEmptyBlocks = -1 // SPARK-32436 Scala 2.13 doesn't initialize this during deserialization
     emptyBlocks = new RoaringBitmap()
-    emptyBlocks.readExternal(in)
+    emptyBlocks.deserialize(in)
     avgSize = in.readLong()
     val count = in.readInt()
     val hugeBlockSizesImpl = mutable.Map.empty[Int, Byte]

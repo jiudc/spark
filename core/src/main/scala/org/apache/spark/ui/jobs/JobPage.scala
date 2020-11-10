@@ -127,7 +127,8 @@ private[ui] class JobPage(parent: JobsTab, store: AppStatusStore) extends WebUIP
              |    'Removed at ${UIUtils.formatDate(removeTime)}' +
              |    '${
                       e.removeReason.map { reason =>
-                        s"""<br>Reason: ${reason.replace("\n", " ")}"""
+                        s"""<br>Reason: ${StringEscapeUtils.escapeEcmaScript(
+                          reason.replace("\n", " "))}"""
                       }.getOrElse("")
                    }"' +
              |    'data-html="true">Executor ${e.id} removed</div>'
@@ -255,7 +256,8 @@ private[ui] class JobPage(parent: JobsTab, store: AppStatusStore) extends WebUIP
           tasks = None,
           executorSummary = None,
           killedTasksSummary = Map(),
-          ResourceProfile.UNKNOWN_RESOURCE_PROFILE_ID)
+          ResourceProfile.UNKNOWN_RESOURCE_PROFILE_ID,
+          peakExecutorMetrics = None)
       }
     }
 

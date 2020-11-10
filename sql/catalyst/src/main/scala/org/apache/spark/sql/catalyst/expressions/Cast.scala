@@ -108,8 +108,8 @@ object Cast {
    */
   def needsTimeZone(from: DataType, to: DataType): Boolean = (from, to) match {
     case (StringType, TimestampType | DateType) => true
+    case (TimestampType | DateType, StringType) => true
     case (DateType, TimestampType) => true
-    case (TimestampType, StringType) => true
     case (TimestampType, DateType) => true
     case (ArrayType(fromType, _), ArrayType(toType, _)) => needsTimeZone(fromType, toType)
     case (MapType(fromKey, fromValue, _), MapType(toKey, toValue, _)) =>
@@ -297,6 +297,10 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
   private lazy val dateFormatter = DateFormatter(zoneId)
   private lazy val timestampFormatter = TimestampFormatter.getFractionFormatter(zoneId)
 
+  private val legacyCastToStr = SQLConf.get.getConf(SQLConf.LEGACY_COMPLEX_TYPES_TO_STRING)
+  // The brackets that are used in casting structs and maps to strings
+  private val (leftBracket, rightBracket) = if (legacyCastToStr) ("[", "]") else ("{", "}")
+
   // UDFToString
   private[this] def castToString(from: DataType): Any => Any = from match {
     case CalendarIntervalType =>
@@ -311,13 +315,17 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
         builder.append("[")
         if (array.numElements > 0) {
           val toUTF8String = castToString(et)
-          if (!array.isNullAt(0)) {
+          if (array.isNullAt(0)) {
+            if (!legacyCastToStr) builder.append("null")
+          } else {
             builder.append(toUTF8String(array.get(0, et)).asInstanceOf[UTF8String])
           }
           var i = 1
           while (i < array.numElements) {
             builder.append(",")
-            if (!array.isNullAt(i)) {
+            if (array.isNullAt(i)) {
+              if (!legacyCastToStr) builder.append(" null")
+            } else {
               builder.append(" ")
               builder.append(toUTF8String(array.get(i, et)).asInstanceOf[UTF8String])
             }
@@ -330,7 +338,7 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
     case MapType(kt, vt, _) =>
       buildCast[MapData](_, map => {
         val builder = new UTF8StringBuilder
-        builder.append("[")
+        builder.append(leftBracket)
         if (map.numElements > 0) {
           val keyArray = map.keyArray()
           val valueArray = map.valueArray()
@@ -338,7 +346,9 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
           val valueToUTF8String = castToString(vt)
           builder.append(keyToUTF8String(keyArray.get(0, kt)).asInstanceOf[UTF8String])
           builder.append(" ->")
-          if (!valueArray.isNullAt(0)) {
+          if (valueArray.isNullAt(0)) {
+            if (!legacyCastToStr) builder.append(" null")
+          } else {
             builder.append(" ")
             builder.append(valueToUTF8String(valueArray.get(0, vt)).asInstanceOf[UTF8String])
           }
@@ -347,7 +357,9 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
             builder.append(", ")
             builder.append(keyToUTF8String(keyArray.get(i, kt)).asInstanceOf[UTF8String])
             builder.append(" ->")
-            if (!valueArray.isNullAt(i)) {
+            if (valueArray.isNullAt(i)) {
+              if (!legacyCastToStr) builder.append(" null")
+            } else {
               builder.append(" ")
               builder.append(valueToUTF8String(valueArray.get(i, vt))
                 .asInstanceOf[UTF8String])
@@ -355,30 +367,34 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
             i += 1
           }
         }
-        builder.append("]")
+        builder.append(rightBracket)
         builder.build()
       })
     case StructType(fields) =>
       buildCast[InternalRow](_, row => {
         val builder = new UTF8StringBuilder
-        builder.append("[")
+        builder.append(leftBracket)
         if (row.numFields > 0) {
           val st = fields.map(_.dataType)
           val toUTF8StringFuncs = st.map(castToString)
-          if (!row.isNullAt(0)) {
+          if (row.isNullAt(0)) {
+            if (!legacyCastToStr) builder.append("null")
+          } else {
             builder.append(toUTF8StringFuncs(0)(row.get(0, st(0))).asInstanceOf[UTF8String])
           }
           var i = 1
           while (i < row.numFields) {
             builder.append(",")
-            if (!row.isNullAt(i)) {
+            if (row.isNullAt(i)) {
+              if (!legacyCastToStr) builder.append(" null")
+            } else {
               builder.append(" ")
               builder.append(toUTF8StringFuncs(i)(row.get(i, st(i))).asInstanceOf[UTF8String])
             }
             i += 1
           }
         }
-        builder.append("]")
+        builder.append(rightBracket)
         builder.build()
       })
     case pudt: PythonUserDefinedType => castToString(pudt.sqlType)
@@ -655,19 +671,13 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
 
 
   private[this] def castToDecimal(from: DataType, target: DecimalType): Any => Any = from match {
-    case StringType =>
-      buildCast[UTF8String](_, s => try {
-        // According the benchmark test,  `s.toString.trim` is much faster than `s.trim.toString`.
-        // Please refer to https://github.com/apache/spark/pull/26640
-        changePrecision(Decimal(new JavaBigDecimal(s.toString.trim)), target)
-      } catch {
-        case _: NumberFormatException =>
-          if (ansiEnabled) {
-            throw new NumberFormatException(s"invalid input syntax for type numeric: $s")
-          } else {
-            null
-          }
+    case StringType if !ansiEnabled =>
+      buildCast[UTF8String](_, s => {
+        val d = Decimal.fromString(s)
+        if (d == null) null else changePrecision(d, target)
       })
+    case StringType if ansiEnabled =>
+      buildCast[UTF8String](_, s => changePrecision(Decimal.fromStringANSI(s), target))
     case BooleanType =>
       buildCast[Boolean](_, b => toPrecision(if (b) Decimal.ONE else Decimal.ZERO, target))
     case DateType =>
@@ -870,8 +880,7 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
       castArrayCode(from.asInstanceOf[ArrayType].elementType, array.elementType, ctx)
     case map: MapType => castMapCode(from.asInstanceOf[MapType], map, ctx)
     case struct: StructType => castStructCode(from.asInstanceOf[StructType], struct, ctx)
-    case udt: UserDefinedType[_]
-      if udt.userClass == from.asInstanceOf[UserDefinedType[_]].userClass =>
+    case udt: UserDefinedType[_] if udt.acceptsType(from) =>
       (c, evPrim, evNull) => code"$evPrim = $c;"
     case _: UserDefinedType[_] =>
       throw new SparkException(s"Cannot cast $from to $to.")
@@ -889,6 +898,10 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
         ${cast(input, result, resultIsNull)}
       }
     """
+  }
+
+  private def appendIfNotLegacyCastToStr(buffer: ExprValue, s: String): Block = {
+    if (!legacyCastToStr) code"""$buffer.append("$s");""" else EmptyBlock
   }
 
   private def writeArrayToStringBuilder(
@@ -913,12 +926,16 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
     code"""
        |$buffer.append("[");
        |if ($array.numElements() > 0) {
-       |  if (!$array.isNullAt(0)) {
+       |  if ($array.isNullAt(0)) {
+       |    ${appendIfNotLegacyCastToStr(buffer, "null")}
+       |  } else {
        |    $buffer.append($elementToStringFunc(${CodeGenerator.getValue(array, et, "0")}));
        |  }
        |  for (int $loopIndex = 1; $loopIndex < $array.numElements(); $loopIndex++) {
        |    $buffer.append(",");
-       |    if (!$array.isNullAt($loopIndex)) {
+       |    if ($array.isNullAt($loopIndex)) {
+       |      ${appendIfNotLegacyCastToStr(buffer, " null")}
+       |    } else {
        |      $buffer.append(" ");
        |      $buffer.append($elementToStringFunc(${CodeGenerator.getValue(array, et, loopIndex)}));
        |    }
@@ -962,11 +979,13 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
     val getMapKeyArray = CodeGenerator.getValue(mapKeyArray, kt, loopIndex)
     val getMapValueArray = CodeGenerator.getValue(mapValueArray, vt, loopIndex)
     code"""
-       |$buffer.append("[");
+       |$buffer.append("$leftBracket");
        |if ($map.numElements() > 0) {
        |  $buffer.append($keyToStringFunc($getMapFirstKey));
        |  $buffer.append(" ->");
-       |  if (!$map.valueArray().isNullAt(0)) {
+       |  if ($map.valueArray().isNullAt(0)) {
+       |    ${appendIfNotLegacyCastToStr(buffer, " null")}
+       |  } else {
        |    $buffer.append(" ");
        |    $buffer.append($valueToStringFunc($getMapFirstValue));
        |  }
@@ -974,13 +993,15 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
        |    $buffer.append(", ");
        |    $buffer.append($keyToStringFunc($getMapKeyArray));
        |    $buffer.append(" ->");
-       |    if (!$map.valueArray().isNullAt($loopIndex)) {
+       |    if ($map.valueArray().isNullAt($loopIndex)) {
+       |      ${appendIfNotLegacyCastToStr(buffer, " null")}
+       |    } else {
        |      $buffer.append(" ");
        |      $buffer.append($valueToStringFunc($getMapValueArray));
        |    }
        |  }
        |}
-       |$buffer.append("]");
+       |$buffer.append("$rightBracket");
      """.stripMargin
   }
 
@@ -996,7 +1017,9 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
       val javaType = JavaCode.javaType(ft)
       code"""
          |${if (i != 0) code"""$buffer.append(",");""" else EmptyBlock}
-         |if (!$row.isNullAt($i)) {
+         |if ($row.isNullAt($i)) {
+         |  ${appendIfNotLegacyCastToStr(buffer, if (i == 0) "null" else " null")}
+         |} else {
          |  ${if (i != 0) code"""$buffer.append(" ");""" else EmptyBlock}
          |
          |  // Append $i field into the string buffer
@@ -1015,9 +1038,9 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
         (classOf[UTF8StringBuilder].getName, buffer.code) :: Nil)
 
     code"""
-       |$buffer.append("[");
+       |$buffer.append("$leftBracket");
        |$writeStructCode
-       |$buffer.append("]");
+       |$buffer.append("$rightBracket");
      """.stripMargin
   }
 
@@ -1158,20 +1181,21 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
     val tmp = ctx.freshVariable("tmpDecimal", classOf[Decimal])
     val canNullSafeCast = Cast.canNullSafeCastToDecimal(from, target)
     from match {
-      case StringType =>
+      case StringType if !ansiEnabled =>
         (c, evPrim, evNull) =>
-          val handleException = if (ansiEnabled) {
-            s"""throw new NumberFormatException("invalid input syntax for type numeric: $c");"""
-          } else {
-            s"$evNull =true;"
-          }
           code"""
-            try {
-              Decimal $tmp = Decimal.apply(new java.math.BigDecimal($c.toString().trim()));
+              Decimal $tmp = Decimal.fromString($c);
+              if ($tmp == null) {
+                $evNull = true;
+              } else {
+                ${changePrecision(tmp, target, evPrim, evNull, canNullSafeCast)}
+              }
+          """
+      case StringType if ansiEnabled =>
+        (c, evPrim, evNull) =>
+          code"""
+              Decimal $tmp = Decimal.fromStringANSI($c);
               ${changePrecision(tmp, target, evPrim, evNull, canNullSafeCast)}
-            } catch (java.lang.NumberFormatException e) {
-              $handleException
-            }
           """
       case BooleanType =>
         (c, evPrim, evNull) =>
@@ -1521,7 +1545,7 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
         val floatStr = ctx.freshVariable("floatStr", StringType)
         (c, evPrim, evNull) =>
           val handleNull = if (ansiEnabled) {
-            s"""throw new NumberFormatException("invalid input syntax for type numeric: $c");"""
+            s"""throw new NumberFormatException("invalid input syntax for type numeric: " + $c);"""
           } else {
             s"$evNull = true;"
           }
@@ -1557,7 +1581,7 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
         val doubleStr = ctx.freshVariable("doubleStr", StringType)
         (c, evPrim, evNull) =>
           val handleNull = if (ansiEnabled) {
-            s"""throw new NumberFormatException("invalid input syntax for type numeric: $c");"""
+            s"""throw new NumberFormatException("invalid input syntax for type numeric: " + $c);"""
           } else {
             s"$evNull = true;"
           }
@@ -1720,7 +1744,8 @@ abstract class CastBase extends UnaryExpression with TimeZoneAwareExpression wit
     Examples:
       > SELECT _FUNC_('10' as int);
        10
-  """)
+  """,
+  since = "1.0.0")
 case class Cast(child: Expression, dataType: DataType, timeZoneId: Option[String] = None)
   extends CastBase {
 

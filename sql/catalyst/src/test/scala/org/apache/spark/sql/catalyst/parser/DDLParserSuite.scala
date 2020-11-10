@@ -20,7 +20,7 @@ package org.apache.spark.sql.catalyst.parser
 import java.util.Locale
 
 import org.apache.spark.sql.AnalysisException
-import org.apache.spark.sql.catalyst.analysis.{AnalysisTest, GlobalTempView, LocalTempView, PersistedView, UnresolvedAttribute, UnresolvedNamespace, UnresolvedRelation, UnresolvedStar, UnresolvedTable, UnresolvedTableOrView}
+import org.apache.spark.sql.catalyst.analysis.{AnalysisTest, GlobalTempView, LocalTempView, PersistedView, UnresolvedAttribute, UnresolvedFunc, UnresolvedNamespace, UnresolvedRelation, UnresolvedStar, UnresolvedTable, UnresolvedTableOrView}
 import org.apache.spark.sql.catalyst.catalog.{ArchiveResource, BucketSpec, FileResource, FunctionResource, FunctionResourceType, JarResource}
 import org.apache.spark.sql.catalyst.expressions.{EqualTo, Literal}
 import org.apache.spark.sql.catalyst.plans.logical._
@@ -381,19 +381,28 @@ class DDLParserSuite extends AnalysisTest {
 
   test("drop table") {
     parseCompare("DROP TABLE testcat.ns1.ns2.tbl",
-      DropTableStatement(Seq("testcat", "ns1", "ns2", "tbl"), ifExists = false, purge = false))
+      DropTable(
+        UnresolvedTableOrView(Seq("testcat", "ns1", "ns2", "tbl")),
+        ifExists = false,
+        purge = false))
     parseCompare(s"DROP TABLE db.tab",
-      DropTableStatement(Seq("db", "tab"), ifExists = false, purge = false))
+      DropTable(
+        UnresolvedTableOrView(Seq("db", "tab")), ifExists = false, purge = false))
     parseCompare(s"DROP TABLE IF EXISTS db.tab",
-      DropTableStatement(Seq("db", "tab"), ifExists = true, purge = false))
+      DropTable(
+        UnresolvedTableOrView(Seq("db", "tab")), ifExists = true, purge = false))
     parseCompare(s"DROP TABLE tab",
-      DropTableStatement(Seq("tab"), ifExists = false, purge = false))
+      DropTable(
+        UnresolvedTableOrView(Seq("tab")), ifExists = false, purge = false))
     parseCompare(s"DROP TABLE IF EXISTS tab",
-      DropTableStatement(Seq("tab"), ifExists = true, purge = false))
+      DropTable(
+        UnresolvedTableOrView(Seq("tab")), ifExists = true, purge = false))
     parseCompare(s"DROP TABLE tab PURGE",
-      DropTableStatement(Seq("tab"), ifExists = false, purge = true))
+      DropTable(
+        UnresolvedTableOrView(Seq("tab")), ifExists = false, purge = true))
     parseCompare(s"DROP TABLE IF EXISTS tab PURGE",
-      DropTableStatement(Seq("tab"), ifExists = true, purge = true))
+      DropTable(
+        UnresolvedTableOrView(Seq("tab")), ifExists = true, purge = true))
   }
 
   test("drop view") {
@@ -591,6 +600,13 @@ class DDLParserSuite extends AnalysisTest {
         None))
   }
 
+  test("alter table: update column type invalid type") {
+    val msg = intercept[ParseException] {
+      parsePlan("ALTER TABLE table_name ALTER COLUMN a.b.c TYPE bad_type")
+    }.getMessage
+    assert(msg.contains("DataType bad_type is not supported"))
+  }
+
   test("alter table: update column type") {
     comparePlans(
       parsePlan("ALTER TABLE table_name CHANGE COLUMN a.b.c TYPE bigint"),
@@ -780,27 +796,27 @@ class DDLParserSuite extends AnalysisTest {
 
   test("describe table column") {
     comparePlans(parsePlan("DESCRIBE t col"),
-      DescribeColumnStatement(
-        Seq("t"), Seq("col"), isExtended = false))
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t")), Seq("col"), isExtended = false))
     comparePlans(parsePlan("DESCRIBE t `abc.xyz`"),
-      DescribeColumnStatement(
-        Seq("t"), Seq("abc.xyz"), isExtended = false))
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t")), Seq("abc.xyz"), isExtended = false))
     comparePlans(parsePlan("DESCRIBE t abc.xyz"),
-      DescribeColumnStatement(
-        Seq("t"), Seq("abc", "xyz"), isExtended = false))
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t")), Seq("abc", "xyz"), isExtended = false))
     comparePlans(parsePlan("DESCRIBE t `a.b`.`x.y`"),
-      DescribeColumnStatement(
-        Seq("t"), Seq("a.b", "x.y"), isExtended = false))
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t")), Seq("a.b", "x.y"), isExtended = false))
 
     comparePlans(parsePlan("DESCRIBE TABLE t col"),
-      DescribeColumnStatement(
-        Seq("t"), Seq("col"), isExtended = false))
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t")), Seq("col"), isExtended = false))
     comparePlans(parsePlan("DESCRIBE TABLE EXTENDED t col"),
-      DescribeColumnStatement(
-        Seq("t"), Seq("col"), isExtended = true))
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t")), Seq("col"), isExtended = true))
     comparePlans(parsePlan("DESCRIBE TABLE FORMATTED t col"),
-      DescribeColumnStatement(
-        Seq("t"), Seq("col"), isExtended = true))
+      DescribeColumn(
+        UnresolvedTableOrView(Seq("t")), Seq("col"), isExtended = true))
 
     val caught = intercept[AnalysisException](
       parsePlan("DESCRIBE TABLE t PARTITION (ds='1970-01-01') col"))
@@ -1486,42 +1502,59 @@ class DDLParserSuite extends AnalysisTest {
 
   test("analyze table statistics") {
     comparePlans(parsePlan("analyze table a.b.c compute statistics"),
-      AnalyzeTableStatement(Seq("a", "b", "c"), Map.empty, noScan = false))
+      AnalyzeTable(
+        UnresolvedTableOrView(Seq("a", "b", "c"), allowTempView = false),
+        Map.empty, noScan = false))
     comparePlans(parsePlan("analyze table a.b.c compute statistics noscan"),
-      AnalyzeTableStatement(Seq("a", "b", "c"), Map.empty, noScan = true))
+      AnalyzeTable(
+        UnresolvedTableOrView(Seq("a", "b", "c"), allowTempView = false),
+        Map.empty, noScan = true))
     comparePlans(parsePlan("analyze table a.b.c partition (a) compute statistics nOscAn"),
-      AnalyzeTableStatement(Seq("a", "b", "c"), Map("a" -> None), noScan = true))
+      AnalyzeTable(
+        UnresolvedTableOrView(Seq("a", "b", "c"), allowTempView = false),
+        Map("a" -> None), noScan = true))
 
     // Partitions specified
     comparePlans(
       parsePlan("ANALYZE TABLE a.b.c PARTITION(ds='2008-04-09', hr=11) COMPUTE STATISTICS"),
-      AnalyzeTableStatement(
-        Seq("a", "b", "c"), Map("ds" -> Some("2008-04-09"), "hr" -> Some("11")), noScan = false))
+      AnalyzeTable(
+        UnresolvedTableOrView(Seq("a", "b", "c"), allowTempView = false),
+        Map("ds" -> Some("2008-04-09"), "hr" -> Some("11")), noScan = false))
     comparePlans(
       parsePlan("ANALYZE TABLE a.b.c PARTITION(ds='2008-04-09', hr=11) COMPUTE STATISTICS noscan"),
-      AnalyzeTableStatement(
-        Seq("a", "b", "c"), Map("ds" -> Some("2008-04-09"), "hr" -> Some("11")), noScan = true))
+      AnalyzeTable(
+        UnresolvedTableOrView(Seq("a", "b", "c"), allowTempView = false),
+        Map("ds" -> Some("2008-04-09"), "hr" -> Some("11")), noScan = true))
     comparePlans(
       parsePlan("ANALYZE TABLE a.b.c PARTITION(ds='2008-04-09') COMPUTE STATISTICS noscan"),
-      AnalyzeTableStatement(Seq("a", "b", "c"), Map("ds" -> Some("2008-04-09")), noScan = true))
+      AnalyzeTable(
+        UnresolvedTableOrView(Seq("a", "b", "c"), allowTempView = false),
+        Map("ds" -> Some("2008-04-09")), noScan = true))
     comparePlans(
       parsePlan("ANALYZE TABLE a.b.c PARTITION(ds='2008-04-09', hr) COMPUTE STATISTICS"),
-      AnalyzeTableStatement(
-        Seq("a", "b", "c"), Map("ds" -> Some("2008-04-09"), "hr" -> None), noScan = false))
+      AnalyzeTable(
+        UnresolvedTableOrView(Seq("a", "b", "c"), allowTempView = false),
+        Map("ds" -> Some("2008-04-09"), "hr" -> None), noScan = false))
     comparePlans(
       parsePlan("ANALYZE TABLE a.b.c PARTITION(ds='2008-04-09', hr) COMPUTE STATISTICS noscan"),
-      AnalyzeTableStatement(
-        Seq("a", "b", "c"), Map("ds" -> Some("2008-04-09"), "hr" -> None), noScan = true))
+      AnalyzeTable(
+        UnresolvedTableOrView(Seq("a", "b", "c"), allowTempView = false),
+        Map("ds" -> Some("2008-04-09"), "hr" -> None), noScan = true))
     comparePlans(
       parsePlan("ANALYZE TABLE a.b.c PARTITION(ds, hr=11) COMPUTE STATISTICS noscan"),
-      AnalyzeTableStatement(
-        Seq("a", "b", "c"), Map("ds" -> None, "hr" -> Some("11")), noScan = true))
+      AnalyzeTable(
+        UnresolvedTableOrView(Seq("a", "b", "c"), allowTempView = false),
+        Map("ds" -> None, "hr" -> Some("11")), noScan = true))
     comparePlans(
       parsePlan("ANALYZE TABLE a.b.c PARTITION(ds, hr) COMPUTE STATISTICS"),
-      AnalyzeTableStatement(Seq("a", "b", "c"), Map("ds" -> None, "hr" -> None), noScan = false))
+      AnalyzeTable(
+        UnresolvedTableOrView(Seq("a", "b", "c"), allowTempView = false),
+        Map("ds" -> None, "hr" -> None), noScan = false))
     comparePlans(
       parsePlan("ANALYZE TABLE a.b.c PARTITION(ds, hr) COMPUTE STATISTICS noscan"),
-      AnalyzeTableStatement(Seq("a", "b", "c"), Map("ds" -> None, "hr" -> None), noScan = true))
+      AnalyzeTable(
+        UnresolvedTableOrView(Seq("a", "b", "c"), allowTempView = false),
+        Map("ds" -> None, "hr" -> None), noScan = true))
 
     intercept("analyze table a.b.c compute statistics xxxx",
       "Expected `NOSCAN` instead of `xxxx`")
@@ -1534,7 +1567,8 @@ class DDLParserSuite extends AnalysisTest {
 
     comparePlans(
       parsePlan("ANALYZE TABLE a.b.c COMPUTE STATISTICS FOR COLUMNS key, value"),
-      AnalyzeColumnStatement(Seq("a", "b", "c"), Option(Seq("key", "value")), allColumns = false))
+      AnalyzeColumn(
+        UnresolvedTableOrView(Seq("a", "b", "c")), Option(Seq("key", "value")), allColumns = false))
 
     // Partition specified - should be ignored
     comparePlans(
@@ -1543,7 +1577,8 @@ class DDLParserSuite extends AnalysisTest {
            |ANALYZE TABLE a.b.c PARTITION(ds='2017-06-10')
            |COMPUTE STATISTICS FOR COLUMNS key, value
          """.stripMargin),
-      AnalyzeColumnStatement(Seq("a", "b", "c"), Option(Seq("key", "value")), allColumns = false))
+      AnalyzeColumn(
+        UnresolvedTableOrView(Seq("a", "b", "c")), Option(Seq("key", "value")), allColumns = false))
 
     // Partition specified should be ignored in case of COMPUTE STATISTICS FOR ALL COLUMNS
     comparePlans(
@@ -1552,7 +1587,8 @@ class DDLParserSuite extends AnalysisTest {
            |ANALYZE TABLE a.b.c PARTITION(ds='2017-06-10')
            |COMPUTE STATISTICS FOR ALL COLUMNS
          """.stripMargin),
-      AnalyzeColumnStatement(Seq("a", "b", "c"), None, allColumns = true))
+      AnalyzeColumn(
+        UnresolvedTableOrView(Seq("a", "b", "c")), None, allColumns = true))
 
     intercept("ANALYZE TABLE a.b.c COMPUTE STATISTICS FOR ALL COLUMNS key, value",
       "mismatched input 'key' expecting {<EOF>, ';'}")
@@ -1569,15 +1605,15 @@ class DDLParserSuite extends AnalysisTest {
   test("LOAD DATA INTO table") {
     comparePlans(
       parsePlan("LOAD DATA INPATH 'filepath' INTO TABLE a.b.c"),
-      LoadDataStatement(Seq("a", "b", "c"), "filepath", false, false, None))
+      LoadData(UnresolvedTable(Seq("a", "b", "c")), "filepath", false, false, None))
 
     comparePlans(
       parsePlan("LOAD DATA LOCAL INPATH 'filepath' INTO TABLE a.b.c"),
-      LoadDataStatement(Seq("a", "b", "c"), "filepath", true, false, None))
+      LoadData(UnresolvedTable(Seq("a", "b", "c")), "filepath", true, false, None))
 
     comparePlans(
       parsePlan("LOAD DATA LOCAL INPATH 'filepath' OVERWRITE INTO TABLE a.b.c"),
-      LoadDataStatement(Seq("a", "b", "c"), "filepath", true, true, None))
+      LoadData(UnresolvedTable(Seq("a", "b", "c")), "filepath", true, true, None))
 
     comparePlans(
       parsePlan(
@@ -1585,8 +1621,8 @@ class DDLParserSuite extends AnalysisTest {
            |LOAD DATA LOCAL INPATH 'filepath' OVERWRITE INTO TABLE a.b.c
            |PARTITION(ds='2017-06-10')
          """.stripMargin),
-      LoadDataStatement(
-        Seq("a", "b", "c"),
+      LoadData(
+        UnresolvedTable(Seq("a", "b", "c")),
         "filepath",
         true,
         true,
@@ -1665,7 +1701,7 @@ class DDLParserSuite extends AnalysisTest {
   test("REFRESH TABLE") {
     comparePlans(
       parsePlan("REFRESH TABLE a.b.c"),
-      RefreshTableStatement(Seq("a", "b", "c")))
+      RefreshTable(UnresolvedTableOrView(Seq("a", "b", "c"))))
   }
 
   test("show columns") {
@@ -1962,7 +1998,6 @@ class DDLParserSuite extends AnalysisTest {
       """
         |CREATE OR REPLACE GLOBAL TEMPORARY VIEW a.b.c
         |(col1, col3 COMMENT 'hello')
-        |TBLPROPERTIES('prop1Key'="prop1Val")
         |COMMENT 'BLABLA'
         |AS SELECT * FROM tab1
       """.stripMargin
@@ -1971,7 +2006,7 @@ class DDLParserSuite extends AnalysisTest {
       Seq("a", "b", "c"),
       Seq("col1" -> None, "col3" -> Some("hello")),
       Some("BLABLA"),
-      Map("prop1Key" -> "prop1Val"),
+      Map(),
       Some("SELECT * FROM tab1"),
       parsePlan("SELECT * FROM tab1"),
       false,
@@ -2003,6 +2038,17 @@ class DDLParserSuite extends AnalysisTest {
     intercept(sql2, "Found duplicate clauses: TBLPROPERTIES")
   }
 
+  test("SPARK-32374: create temporary view with properties not allowed") {
+    assertUnsupported(
+      sql = """
+        |CREATE OR REPLACE TEMPORARY VIEW a.b.c
+        |(col1, col3 COMMENT 'hello')
+        |TBLPROPERTIES('prop1Key'="prop1Val")
+        |AS SELECT * FROM tab1
+      """.stripMargin,
+      containsThesePhrases = Seq("TBLPROPERTIES can't coexist with CREATE TEMPORARY VIEW"))
+  }
+
   test("SHOW TBLPROPERTIES table") {
     comparePlans(
       parsePlan("SHOW TBLPROPERTIES a.b.c"),
@@ -2016,40 +2062,40 @@ class DDLParserSuite extends AnalysisTest {
   test("DESCRIBE FUNCTION") {
     comparePlans(
       parsePlan("DESC FUNCTION a"),
-      DescribeFunctionStatement(Seq("a"), false))
+      DescribeFunction(UnresolvedFunc(Seq("a")), false))
     comparePlans(
       parsePlan("DESCRIBE FUNCTION a"),
-      DescribeFunctionStatement(Seq("a"), false))
+      DescribeFunction(UnresolvedFunc(Seq("a")), false))
     comparePlans(
       parsePlan("DESCRIBE FUNCTION a.b.c"),
-      DescribeFunctionStatement(Seq("a", "b", "c"), false))
+      DescribeFunction(UnresolvedFunc(Seq("a", "b", "c")), false))
     comparePlans(
       parsePlan("DESCRIBE FUNCTION EXTENDED a.b.c"),
-      DescribeFunctionStatement(Seq("a", "b", "c"), true))
+      DescribeFunction(UnresolvedFunc(Seq("a", "b", "c")), true))
   }
 
   test("SHOW FUNCTIONS") {
     comparePlans(
       parsePlan("SHOW FUNCTIONS"),
-      ShowFunctionsStatement(true, true, None, None))
+      ShowFunctions(None, true, true, None))
     comparePlans(
       parsePlan("SHOW USER FUNCTIONS"),
-      ShowFunctionsStatement(true, false, None, None))
+      ShowFunctions(None, true, false, None))
     comparePlans(
       parsePlan("SHOW user FUNCTIONS"),
-      ShowFunctionsStatement(true, false, None, None))
+      ShowFunctions(None, true, false, None))
     comparePlans(
       parsePlan("SHOW SYSTEM FUNCTIONS"),
-      ShowFunctionsStatement(false, true, None, None))
+      ShowFunctions(None, false, true, None))
     comparePlans(
       parsePlan("SHOW ALL FUNCTIONS"),
-      ShowFunctionsStatement(true, true, None, None))
+      ShowFunctions(None, true, true, None))
     comparePlans(
       parsePlan("SHOW FUNCTIONS LIKE 'funct*'"),
-      ShowFunctionsStatement(true, true, Some("funct*"), None))
+      ShowFunctions(None, true, true, Some("funct*")))
     comparePlans(
       parsePlan("SHOW FUNCTIONS LIKE a.b.c"),
-      ShowFunctionsStatement(true, true, None, Some(Seq("a", "b", "c"))))
+      ShowFunctions(Some(UnresolvedFunc(Seq("a", "b", "c"))), true, true, None))
     val sql = "SHOW other FUNCTIONS"
     intercept(sql, s"$sql not supported")
   }
@@ -2057,19 +2103,19 @@ class DDLParserSuite extends AnalysisTest {
   test("DROP FUNCTION") {
     comparePlans(
       parsePlan("DROP FUNCTION a"),
-      DropFunctionStatement(Seq("a"), false, false))
+      DropFunction(UnresolvedFunc(Seq("a")), false, false))
     comparePlans(
       parsePlan("DROP FUNCTION a.b.c"),
-      DropFunctionStatement(Seq("a", "b", "c"), false, false))
+      DropFunction(UnresolvedFunc(Seq("a", "b", "c")), false, false))
     comparePlans(
       parsePlan("DROP TEMPORARY FUNCTION a.b.c"),
-      DropFunctionStatement(Seq("a", "b", "c"), false, true))
+      DropFunction(UnresolvedFunc(Seq("a", "b", "c")), false, true))
     comparePlans(
       parsePlan("DROP FUNCTION IF EXISTS a.b.c"),
-      DropFunctionStatement(Seq("a", "b", "c"), true, false))
+      DropFunction(UnresolvedFunc(Seq("a", "b", "c")), true, false))
     comparePlans(
       parsePlan("DROP TEMPORARY FUNCTION IF EXISTS a.b.c"),
-      DropFunctionStatement(Seq("a", "b", "c"), true, true))
+      DropFunction(UnresolvedFunc(Seq("a", "b", "c")), true, true))
   }
 
   test("CREATE FUNCTION") {
@@ -2107,6 +2153,15 @@ class DDLParserSuite extends AnalysisTest {
 
     intercept("CREATE FUNCTION a as 'fun' USING OTHER 'o'",
       "Operation not allowed: CREATE FUNCTION with resource type 'other'")
+  }
+
+  test("REFRESH FUNCTION") {
+    parseCompare("REFRESH FUNCTION c",
+      RefreshFunction(UnresolvedFunc(Seq("c"))))
+    parseCompare("REFRESH FUNCTION b.c",
+      RefreshFunction(UnresolvedFunc(Seq("b", "c"))))
+    parseCompare("REFRESH FUNCTION a.b.c",
+      RefreshFunction(UnresolvedFunc(Seq("a", "b", "c"))))
   }
 
   private case class TableSpec(

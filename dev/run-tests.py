@@ -26,7 +26,6 @@ import sys
 import subprocess
 import glob
 import shutil
-from collections import namedtuple
 
 from sparktestsupport import SPARK_HOME, USER_HOME, ERROR_CODES
 from sparktestsupport.shellutils import exit_from_command_with_retcode, run_cmd, rm_r, which
@@ -43,19 +42,21 @@ def determine_modules_for_files(filenames):
     """
     Given a list of filenames, return the set of modules that contain those files.
     If a file is not associated with a more specific submodule, then this method will consider that
-    file to belong to the 'root' module. GitHub Action and Appveyor files are ignored.
+    file to belong to the 'root' module. `.github` directory is counted only in GitHub Actions,
+    and `appveyor.yml` is always ignored because this file is dedicated only to AppVeyor builds.
 
     >>> sorted(x.name for x in determine_modules_for_files(["python/pyspark/a.py", "sql/core/foo"]))
     ['pyspark-core', 'sql']
     >>> [x.name for x in determine_modules_for_files(["file_not_matched_by_any_subproject"])]
     ['root']
-    >>> [x.name for x in determine_modules_for_files( \
-            [".github/workflows/master.yml", "appveyor.yml"])]
+    >>> [x.name for x in determine_modules_for_files(["appveyor.yml"])]
     []
     """
     changed_modules = set()
     for filename in filenames:
-        if filename in (".github/workflows/master.yml", "appveyor.yml"):
+        if filename in ("appveyor.yml",):
+            continue
+        if ("GITHUB_ACTIONS" not in os.environ) and filename.startswith(".github"):
             continue
         matched_at_least_one_module = False
         for module in modules.all_modules:
@@ -327,7 +328,6 @@ def get_hive_profiles(hive_version):
     """
 
     sbt_maven_hive_profiles = {
-        "hive1.2": ["-Phive-1.2"],
         "hive2.3": ["-Phive-2.3"],
     }
 
@@ -609,11 +609,20 @@ def main():
               " install one and retry.")
         sys.exit(2)
 
-    # install SparkR
-    if which("R"):
-        run_cmd([os.path.join(SPARK_HOME, "R", "install-dev.sh")])
-    else:
-        print("Cannot install SparkR as R was not found in PATH")
+    # Install SparkR
+    should_only_test_modules = opts.modules is not None
+    test_modules = []
+    if should_only_test_modules:
+        str_test_modules = [m.strip() for m in opts.modules.split(",")]
+        test_modules = [m for m in modules.all_modules if m.name in str_test_modules]
+
+    if not should_only_test_modules or modules.sparkr in test_modules:
+        # If tests modules are specified, we will not run R linter.
+        # SparkR needs the manual SparkR installation.
+        if which("R"):
+            run_cmd([os.path.join(SPARK_HOME, "R", "install-dev.sh")])
+        else:
+            print("Cannot install SparkR as R was not found in PATH")
 
     if os.environ.get("AMPLAB_JENKINS"):
         # if we're on the Amplab Jenkins build servers setup variables
@@ -629,7 +638,7 @@ def main():
     else:
         # else we're running locally or Github Actions.
         build_tool = "sbt"
-        hadoop_version = os.environ.get("HADOOP_PROFILE", "hadoop2.7")
+        hadoop_version = os.environ.get("HADOOP_PROFILE", "hadoop3.2")
         hive_version = os.environ.get("HIVE_PROFILE", "hive2.3")
         if "GITHUB_ACTIONS" in os.environ:
             test_env = "github_actions"
@@ -640,23 +649,21 @@ def main():
           "and Hive profile", hive_version, "under environment", test_env)
     extra_profiles = get_hadoop_profiles(hadoop_version) + get_hive_profiles(hive_version)
 
-    changed_modules = None
-    test_modules = None
-    changed_files = None
-    should_only_test_modules = opts.modules is not None
+    changed_modules = []
+    changed_files = []
     included_tags = []
     excluded_tags = []
     if should_only_test_modules:
-        str_test_modules = [m.strip() for m in opts.modules.split(",")]
-        test_modules = [m for m in modules.all_modules if m.name in str_test_modules]
-
         # If we're running the tests in Github Actions, attempt to detect and test
         # only the affected modules.
         if test_env == "github_actions":
-            # Set the log level of sbt as ERROR to make the output more readable.
-            if build_tool == "sbt":
-                extra_profiles.append("--error")
-            if os.environ["GITHUB_BASE_REF"] != "":
+            if os.environ["GITHUB_INPUT_BRANCH"] != "":
+                # Dispatched request
+                # Note that it assumes Github Actions has already merged
+                # the given `GITHUB_INPUT_BRANCH` branch.
+                changed_files = identify_changed_files_from_git_commits(
+                    "HEAD", target_branch=os.environ["GITHUB_SHA"])
+            elif os.environ["GITHUB_BASE_REF"] != "":
                 # Pull requests
                 changed_files = identify_changed_files_from_git_commits(
                     os.environ["GITHUB_SHA"], target_branch=os.environ["GITHUB_BASE_REF"])
